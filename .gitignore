@@ -1,0 +1,82 @@
+# ============================================================
+# .gitignore — App-web-Analisis-de-importaciones
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+
+# --- Virtual environments ---
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Jupyter Notebooks (checkpoints only) ---
+.ipynb_checkpoints/
+# Uncomment below to also exclude notebooks:
+# *.ipynb
+
+# --- Data files (large / sensitive) ---
+data/*.xlsx
+data/*.xls
+data/*.csv
+# Keep this folder tracked but without data
+!data/.gitkeep
+
+# --- Trained models (large binary files) ---
+modelos/modelos_nandina/*.pkl
+modelos/predicciones_nandina/*.pkl
+# Keep folder structure tracked
+!modelos/modelos_nandina/.gitkeep
+!modelos/predicciones_nandina/.gitkeep
+
+# --- Streamlit cache ---
+.streamlit/secrets.toml
+
+# --- OS files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Environment variables / secrets ---
+.env
+.env.local
+*.key
+secrets.json
+credentials.json
+service_account.json
+
+# --- Logs ---
+*.log
+logs/

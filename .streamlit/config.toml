@@ -1,0 +1,12 @@
+[server]
+runOnSave = true
+[client]
+showSidebarNavigation = false
+
+[theme]
+base = "dark"
+primaryColor = "#f13e3eff"          # colores primarios (botones,...)
+backgroundColor = "#141313ff"       # Fondo principal
+secondaryBackgroundColor = "#77aeecff"  # Panel lateral
+textColor = "#f5f2f2ff"             # Texto principal
+font = "sans serif"

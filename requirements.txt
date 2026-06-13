@@ -1,0 +1,27 @@
+# ============================================================
+# requirements.txt — App-web-Analisis-de-importaciones
+# Generated: Junio 2026
+# Python 3.10+
+# ============================================================
+
+# Core data processing
+pandas==2.2.2
+numpy==1.26.4
+openpyxl==3.1.2          # Required for pd.read_excel()
+
+# Machine Learning
+scikit-learn==1.4.2
+lightgbm==4.3.0
+
+# Web application
+streamlit==1.35.0
+
+# Visualization
+matplotlib==3.9.0
+
+# Utilities
+Pillow==10.3.0            # PIL — image handling in Streamlit
+tqdm==4.66.4              # Progress bars in training script
+
+# Note: pickle, pathlib, os, enum are part of Python's standard library
+# and do not need to be installed separately.
