@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.metrics import accuracy_score, f1_score, mean_absolute_error, mean_squared_error, r2_score
 import lightgbm as lgb
 import pickle
 from pathlib import Path
@@ -11,22 +11,22 @@ from itertools import islice
 
 
 RUTA_MODELOS = Path("modelos/modelos_nandina")
-RUTA_MODELOS.mkdir(exist_ok=True)
+RUTA_MODELOS.mkdir(parents=True, exist_ok=True)
 RUTA_SALIDA = Path("modelos/predicciones_nandina")
-RUTA_SALIDA.mkdir(exist_ok=True)
+RUTA_SALIDA.mkdir(parents=True, exist_ok=True)
 
+# Clases con menos de este número de ejemplos se agrupan en "OTROS".
+# Evita que el modelo intente aprender categorías con muy pocos datos.
+MIN_EJEMPLOS_CLASE = 20
 
 
 def optimizar_memoria(df):
     """Reduce la huella de memoria del DataFrame."""
     print(f"Memoria inicial: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
     for col in df.columns:
-        # Optimizar categóricas/object (lo más importante)
         if df[col].dtype == 'object' or df[col].dtype == 'O':
-            # Asegurar que no sean demasiados valores únicos antes de convertir a category
-            if df[col].nunique() < len(df) / 2: 
+            if df[col].nunique() < len(df) / 2:
                 df[col] = df[col].astype('category')
-        # Optimizar numéricas
         elif 'int' in str(df[col].dtype):
             df[col] = pd.to_numeric(df[col], downcast='integer')
         elif 'float' in str(df[col].dtype):
@@ -34,142 +34,132 @@ def optimizar_memoria(df):
     print(f"Memoria final: {df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
     return df
 
-# Cargar dataset
-df = pd.read_excel("data/dataset_talento_tech.xlsx")
 
-# Aplicar al inicio
+def agrupar_clases_raras(serie, min_ejemplos=MIN_EJEMPLOS_CLASE):
+    """Agrupa en 'OTROS' las categorías con menos de min_ejemplos apariciones."""
+    conteo = serie.value_counts()
+    clases_frecuentes = conteo[conteo >= min_ejemplos].index
+    return serie.where(serie.isin(clases_frecuentes), other="OTROS")
+
+
+# Cargar dataset
+df = pd.read_csv("data/data.csv")
 df = optimizar_memoria(df)
 
 # Variables
 targets_clas = ['principio activo', 'fabricante', 'marca']
 target_reg = 'precio'
 
-features = ['VIA_TRANSP', 'NITIMPOR','NANDINA','PAISORIGEN','PAISPROC'
-                                           ,'PAISCOMPRA','KILOSNETO','FOBDO', 'FLETES']
+features = ['VIA_TRANSP', 'NITIMPOR', 'NANDINA', 'PAISORIGEN', 'PAISPROC',
+            'PAISCOMPRA', 'KILOSNETO', 'FOBDO', 'FLETES']
 
-
+# Identificadores y códigos: su valor numérico no es ordinal -> categóricos.
+features_categoricas = ['VIA_TRANSP', 'NITIMPOR', 'NANDINA',
+                        'PAISORIGEN', 'PAISPROC', 'PAISCOMPRA']
 
 
 def entrenar_modelos(df, features, targets_clas, target_reg):
-    
+
     for TIPO, grupo in tqdm(
-        islice(df.groupby("TIPO_PRODUCTO"),4), 
+        islice(df.groupby("TIPO_PRODUCTO"), 4),
         desc="Entrenando modelos..."):
-        print(f"\n Entrenando modelo para NANDINA = {TIPO} (n={len(grupo)})")
-    
-        grupo = grupo.dropna(subset=features + targets_clas + [target_reg])
+        print(f"\n Entrenando modelo para TIPO_PRODUCTO = {TIPO} (n={len(grupo)})")
+
+        grupo = grupo.dropna(subset=features + targets_clas + [target_reg]).copy()
         if grupo.empty:
             print(" Sin datos válidos, se omite este grupo.")
             continue
 
+        # Un precio de importación no puede ser negativo: se filtran como inválidos.
+        n_antes = len(grupo)
+        grupo = grupo[grupo[target_reg] >= 0].copy()
+        n_filtrados = n_antes - len(grupo)
+        if n_filtrados > 0:
+            print(f"  Filtradas {n_filtrados} filas con precio negativo (inválido)")
+
         X = grupo[features].copy()
-        y_clas = grupo[targets_clas].copy()
         y_reg = grupo[target_reg].copy()
 
-        # Codificar variables categóricas
-        le_dict = {}        
-        for col in X.select_dtypes(include=["object",'category']).columns:
-            le = LabelEncoder()
-            X[col] = le.fit_transform(X[col].astype(str))
-            le_dict[col] = le
+        # Agrupar clases raras en cada target de clasificación
+        y_clas = pd.DataFrame(index=grupo.index)
+        for col in targets_clas:
+            y_clas[col] = agrupar_clases_raras(grupo[col].astype(str))
 
-        for col in y_clas.select_dtypes(include=["object",'category']).columns:
+        le_dict = {}
+
+        # Codificar features categóricas (identificadores y códigos)
+        for col in features_categoricas:
+            if col in X.columns:
+                le = LabelEncoder()
+                X[col] = le.fit_transform(X[col].astype(str))
+                le_dict[col] = le
+
+        # Codificar targets de clasificación
+        for col in targets_clas:
             le = LabelEncoder()
             y_clas[col] = le.fit_transform(y_clas[col].astype(str))
             le_dict[col] = le
 
+        # Log-transform del precio para manejar outliers extremos
+        y_reg_log = np.log1p(y_reg)
+
         # Dividir datos
         X_train, X_test, y_clas_train, y_clas_test, y_reg_train, y_reg_test = train_test_split(
-            X, y_clas, y_reg, test_size=0.2, random_state=42
+            X, y_clas, y_reg_log, test_size=0.2, random_state=42
         )
-        
+
         modelos_clas = {}
-        # LGBM no maneja Multi-target Classification nativamente, entrenamos 3 modelos:
+
+        print(f"\n  --- MÉTRICAS DE EVALUACIÓN ({TIPO}) ---")
         for target in targets_clas:
-            # Usamos n_jobs=-1, pero LGBM es eficiente, puedes probarlo.
-            lgbm_clf = lgb.LGBMClassifier(random_state=42, n_jobs=-1, verbose=-1) 
+            n_clases = y_clas_train[target].nunique()
+            lgbm_clf = lgb.LGBMClassifier(random_state=42, n_jobs=-1, verbose=-1)
             lgbm_clf.fit(X_train, y_clas_train[target])
             modelos_clas[target] = lgbm_clf
-            print(f"  Modelo Clasificación ({target}) entrenado.")
-        
+
+            y_pred = lgbm_clf.predict(X_test)
+            acc = accuracy_score(y_clas_test[target], y_pred)
+            f1 = f1_score(y_clas_test[target], y_pred, average='weighted', zero_division=0)
+            print(f"  [CLAS] {target:<18} accuracy={acc:.3f}  F1(weighted)={f1:.3f}  ({n_clases} clases)")
+
+        # Regresor de precio (entrena en log, evalúa en pesos reales)
         lgbm_reg = lgb.LGBMRegressor(random_state=42, n_jobs=-1, verbose=-1)
         lgbm_reg.fit(X_train, y_reg_train)
-        print("  Modelo Regresión (precio) entrenado.")
-        
 
-        # Guardar
+        y_pred_log = lgbm_reg.predict(X_test)
+        y_pred_reg = np.expm1(y_pred_log)      # revertir a pesos reales
+        y_reg_test_real = np.expm1(y_reg_test)  # valores reales en pesos
+
+        mae = mean_absolute_error(y_reg_test_real, y_pred_reg)
+        rmse = np.sqrt(mean_squared_error(y_reg_test_real, y_pred_reg))
+        r2 = r2_score(y_reg_test_real, y_pred_reg)
+        baseline_pred = np.full_like(y_reg_test_real, y_reg_test_real.mean(), dtype=float)
+        mae_baseline = mean_absolute_error(y_reg_test_real, baseline_pred)
+        mejora = (1 - mae / mae_baseline) * 100
+        print(f"  [REG]  precio             MAE={mae:,.0f}  RMSE={rmse:,.0f}  R2={r2:.3f}")
+        print(f"  [REG]  baseline (media)   MAE={mae_baseline:,.0f}  -> mejora: {mejora:.1f}%")
+
         data_modelo = {
-            #"modelo_clas": clf,
             "modelo_clas": modelos_clas,
-            #"modelo_reg": reg,
             "modelo_reg": lgbm_reg,
-            "X_test":X_test,
+            "X_test": X_test,
+            "y_clas_test": y_clas_test,
+            "y_reg_test": y_reg_test,  # en escala log
             "label_encoders": le_dict,
             "features": features,
+            "features_categoricas": features_categoricas,
             "targets_clas": targets_clas,
             "target_reg": target_reg,
+            "precio_log": True,  # marca que el target está en log1p
         }
 
         with open(RUTA_MODELOS / f"modelo_{TIPO}.pkl", "wb") as f:
             pickle.dump(data_modelo, f)
 
-        print(f"Modelos guardados: modelo_{TIPO}.pkl")
+        print(f"  Modelo guardado: modelo_{TIPO}.pkl")
 
     print("\nEntrenamiento finalizado.")
 
 
-def generar_predicciones_por_nandina(df):
-    for nandina, grupo in tqdm(
-        islice(df.groupby("TIPO_PRODUCTO"), 4), 
-        desc="Entrenando modelos..."):
-        modelo_path = RUTA_MODELOS / f"modelo_{nandina}.pkl"
-        if not modelo_path.exists():
-            print(f" No se encontró modelo para NANDINA = {nandina}. Se omite.")
-            continue
-        print(f" Se encontró modelo para NANDINA = {nandina}. --- {modelo_path}")
-        with open(modelo_path, "rb") as f:
-            data_modelo = pickle.load(f)
-
-        modelos_clas = data_modelo["modelo_clas"] # Cargar diccionario
-        modelo_reg = data_modelo["modelo_reg"]
-        le_dict = data_modelo["label_encoders"]
-        features = data_modelo["features"]
-        targets_clas = data_modelo["targets_clas"]
-        target_reg = data_modelo["target_reg"]
-
-        X = grupo[features].copy()
-        print(X.head())
-        for col in X.select_dtypes(include=["object",'category']).columns:
-            if col in le_dict:
-                le = le_dict[col]
-                X[col] = X[col].map(lambda v: le.transform([v])[0] if v in le.classes_ else -1)
-        
-        df_pred_clas = pd.DataFrame(index=grupo.index)
-        # Iterar sobre los modelos de clasificación
-        print (f"Modelos de clasificacion {modelos_clas}")
-        for target, modelo_clas in modelos_clas.items():
-            y_pred_clas = modelo_clas.predict(X)
-            df_pred_clas[target] = y_pred_clas
-            
-        y_pred_reg = modelo_reg.predict(X)
-        df_pred_reg = pd.DataFrame({target_reg: y_pred_reg}, index=grupo.index)
-
-        # Decodificar clasificaciones
-        for col in df_pred_clas.columns:
-            if col in le_dict:
-                le = le_dict[col]
-                df_pred_clas[col] = le.inverse_transform(df_pred_clas[col].astype(int))
-
-        df_result = pd.concat(
-            [grupo.reset_index(drop=True), df_pred_clas, df_pred_reg], axis=1
-        )
-
-        archivo_salida = RUTA_SALIDA / f"predicciones_{nandina}.pkl"
-        df_result.to_pickle(archivo_salida)
-        print(f"Predicciones guardadas en: {archivo_salida}")
-
-    print("\nProceso de predicciones completado.")
-
 # Ejecutar
 entrenar_modelos(df, features, targets_clas, target_reg)
-#generar_predicciones_por_nandina(df)
